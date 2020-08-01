@@ -3,15 +3,18 @@
 # data in json files                                      #
 ###########################################################
 
-from pathlib import Path
 from datetime import datetime
 from OneThousandPasarell import Gateway
 import json
+import psycopg2
+import os
 
 
 class Project:
     def __init__(self, obj, token):
         super(Project, self).__init__()
+        self.connection = None
+        self.cursor = None
         # Setting project info
         self.name = obj['name']
         self.token = token
@@ -34,53 +37,61 @@ class Project:
     def save_data(self):
         # If the project already exists on the database, we compare the info from Slack and the info from the DB
         # we give priority to Slack information
-        if Path('./BD/Channels/{}.txt'.format(self.name)).exists():
-            with open('./BD/Channels/{}.txt'.format(self.name), 'r') as f:
-                data = json.loads(f.read())
-            if data['num_members'] != len(self.participants['members']):
-                data['num_members'] = len(self.participants['members'])
-                data['PARTICIPANTS'] = self.participants['members']
-            if data['num_calendar'] != len(self.calendar):
-                data['num_calendar'] = len(self.calendar)
-                data['CALENDAR'] = self.calendar
-            if data['MESSAGES'][0]['ts'] != self.messages['messages'][0]['ts']:
-                for i, message in self.messages['messages']:
-                    if message["ts"] == data['MESSAGES'][0]['ts']:
-                        index = i
-                        break
-                mess = next(message for message in self.messages['messages'] if message["ts"] == data['MESSAGES'][0]['ts'])
-                index = self.messages['messages'].index(mess)
-                for i in range(index + 1):
-                    data['MESSAGES'].insert(0, self.messages['messages'][index - i])
-            with open('./BD/Channels/{}.txt'.format(self.name), 'w') as f:
-                f.write(json.dumps(data))
-        # If the project doesn't exist in the DB, we dump all the info
+        self.start_connection()
+        self.cursor.execute("SELECT * "
+                            "FROM channels "
+                            "WHERE id = %s;", (self.id,))
+        channel = self.cursor.fetchone()
+        if channel is None:
+            self.cursor.execute('INSERT INTO channels (id, metadata, trello, messages) VALUES (%s,%s,%s,%s)',
+                                (self.id,
+                                 json.dumps({
+                                    'name': self.name,
+                                    'creator': self.creator,
+                                    'is_member': self.is_member,
+                                    'is_private': self.is_private,
+                                    'num_members': len(self.participants['members']) if 'members' in self.participants else 0,
+                                    'num_calendar': len(self.calendar),
+                                    'topic': self.topic,
+                                    'purpose': self.purpose,
+                                    'participants': self.participants['members'] if 'members' in self.participants else [],
+                                    'calendar': self.calendar}),
+                                 json.dumps(self.board),
+                                 json.dumps(self.messages['messages'])))
+            self.connection.commit()
         else:
-            with open('./BD/Channels/{}.txt'.format(self.name), 'w+') as f:
-                if 'members' in self.participants:
-                    num_members = len(self.participants['members'])
-                    members = self.participants['members']
-                else:
-                    num_members = 0
-                    members = []
-                f.write(json.dumps({
-                    'name': self.name,
-                    'id': self.id,
-                    'creator': self.creator,
-                    'is_member': self.is_member,
-                    'is_private': self.is_private,
-                    'num_members': num_members,
-                    'num_calendar': len(self.calendar),
-                    'topic': self.topic,
-                    'purpose': self.purpose,
-                    'PARTICIPANTS': members,
-                    'trello_board': self.board,
-                    'CALENDAR': self.calendar,
-                    'MESSAGES': self.messages['messages'],
-                    }))
+            channel = list(channel)
+            channel[1]['num_members'] = len(self.participants['members'])
+            channel[1]['participants'] = self.participants['members']
+            channel[1]['num_calendar'] = len(self.calendar)
+            channel[1]['calendar'] = self.calendar
+            channel[2] = self.board
+            if channel[3] != []:
+                if channel[3][0]['ts'] != self.messages['messages'][0]['ts']:
+                    index = 0
+                    for i, message in enumerate(self.messages['messages']):
+                        if message["ts"] == channel[3][0]['ts']:
+                            index = i
+                            break
+                    for i in range(index, 0, -1):
+                        channel[3].insert(0, self.messages['messages'][i - 1])
+            self.cursor.execute('UPDATE channels SET metadata = %s, trello = %s, messages = %s WHERE id = %s;',
+                                (json.dumps(channel[1]),
+                                 json.dumps(channel[2]),
+                                 json.dumps(channel[3]),
+                                 self.id))
+            self.connection.commit()
+            self.stop_connection()
 
+    # When a channel is deleted, the Bot creates a reading file
     def create_reading_file(self):
-        with open('./BD/Channels/{}_readable.txt'.format(self.name), 'w+') as f:
+        self.start_connection()
+        self.cursor.execute("SELECT * "
+                            "FROM channels "
+                            "WHERE id = %s;", (self.id,))
+        channel = self.cursor.fetchone()
+        channel = list(channel)
+        with open('{}_readable.txt'.format(self.name), 'w+') as f:
             trello_board = ''
             if self.board != {}:
                 trello_board = json.dumps(self.board)
@@ -112,39 +123,101 @@ class Project:
 
     # If a new message was posted, we dump it on the database
     def save_new_message(self, event):
-        self.messages['messages'].insert(0, event['event'])
-        with open('./BD/Channels/{}.txt'.format(self.name), 'r') as f:
-            data = json.loads(f.read())
-        data['MESSAGES'].insert(0, event['event'])
-        with open('./BD/Channels/{}.txt'.format(self.name), 'w') as f:
-            f.write(json.dumps(data))
+        self.start_connection()
+        self.cursor.execute("SELECT messages "
+                            "FROM channels "
+                            "WHERE id = %s;", (self.id,))
+        channel = self.cursor.fetchone()
+        channel = list(channel)
+        channel[0].insert(0, event['event'])
+        self.cursor.execute('UPDATE channels SET messages = %s WHERE id = %s;',
+                            (json.dumps(channel[0]),
+                             self.id))
+        self.connection.commit()
+        self.stop_connection()
 
+    # A new user added to a channel
     def new_user_added(self, user_id):
-        if user_id not in self.participants['members']:
+        self.start_connection()
+        self.cursor.execute("SELECT metadata "
+                            "FROM channels "
+                            "WHERE id = %s;", (self.id,))
+        channel = self.cursor.fetchone()
+        channel = list(channel)
+        if user_id not in channel[0]['participants']:
             self.participants['members'].append(user_id)
-            with open('./BD/Channels/{}.txt'.format(self.name), 'r') as f:
-                data = json.loads(f.read())
-            data['num_members'] += 1
-            data['PARTICIPANTS'].append(user_id)
-            with open('./BD/Channels/{}.txt'.format(self.name), 'w+') as f:
-                f.write(json.dumps(data))
+            channel[0]['num_members'] += 1
+            channel[0]['participants'].append(user_id)
+        self.cursor.execute('UPDATE channels SET metadata = %s WHERE id = %s;',
+                            (json.dumps(channel[0]),
+                             self.id))
+        self.connection.commit()
+        self.stop_connection()
 
     # Adding a new task to the project
     def add_task(self, name_list, task):
+        done = False
         for i, _list in enumerate(self.board['lists']):
             if _list['name'].lower().replace(' ', '') == name_list.lower().replace(' ', ''):
                 self.board['lists'][i]['tasks'].append(task)
                 self.board['num_tasks'] += 1
-        with open('./BD/Channels/{}.txt'.format(self.name), 'r') as f:
-            data = json.loads(f.read())
-        data['trello_board'] = self.board
-        with open('./BD/Channels/{}.txt'.format(self.name), 'w') as f:
-            f.write(json.dumps(data))
+                index_list = i
+                done = True
+                break
+        if done:
+            self.start_connection()
+            self.cursor.execute("SELECT trello "
+                                "FROM channels "
+                                "WHERE id = %s;", (self.id,))
+            board = list(self.cursor.fetchone())
+            board[0]['lists'][index_list]['tasks'].append(task)
+            board = tuple(board)
+            self.cursor.execute("UPDATE channels SET trello = %s WHERE id = %s;",
+                                (json.dumps(board[0]),
+                                 self.id))
+            self.connection.commit()
+            self.stop_connection()
+
+    # Update command executed
+    def update_board(self):
+        self.start_connection()
+        self.cursor.execute("SELECT trello "
+                            "FROM channels "
+                            "WHERE id = %s;", (self.id,))
+        board = list(self.cursor.fetchone())
+        board[0] = self.board
+        board = tuple(board)
+        self.cursor.execute("UPDATE channels SET trello = %s WHERE id = %s;",
+                            (json.dumps(board[0]),
+                             self.id))
+        self.connection.commit()
+        self.stop_connection()
+
+    # A trello board was added in this channel
+    def trello_board_added(self, board):
+        self.board = board
+        self.update_board()
+
+    # Start database connection
+    def start_connection(self):
+        self.connection = psycopg2.connect(user=os.environ.get('SQL_USER'),
+                                           password=os.environ.get('SQL_PASSWORD'),
+                                           host=os.environ.get('SQL_HOST'),
+                                           port=os.environ.get('SQL_PORT'),
+                                           database=os.environ.get('SQL_NAME'))
+        self.cursor = self.connection.cursor()
+
+    # Stop database connection
+    def stop_connection(self):
+        self.cursor.close()
+        self.connection.close()
 
 
 class User:
     def __init__(self, obj, token, all_channels):
         super(User, self).__init__()
+        self.connection = None
+        self.cursor = None
         # Setting project info
         self.name = obj['name']
         self.token = token
@@ -171,38 +244,45 @@ class User:
     def save_data(self):
         # If the user already exists on the database, we compare the info from Slack and the info from the DB
         # we give priority to Slack information
-        if Path('./BD/Users/{}.txt'.format(self.real_name)).exists():
-            with open('./BD/Users/{}.txt'.format(self.real_name), 'r') as f:
-                data = json.loads(f.read())
-            if data['num_groups'] != len(self.groups):
-                data['num_groups'] = len(self.groups)
-                data['GROUPS'] = self.groups
-            if data['num_calendar'] != len(self.calendar):
-                data['num_calendar'] = len(self.calendar)
-                data['CALENDAR'] = self.calendar
-            with open('./BD/Users/{}.txt'.format(self.real_name), 'w') as f:
-                f.write(json.dumps(data))
-        # If the user doesn't exist in the DB, we dump all the info
+        self.start_connection()
+        self.cursor.execute("SELECT * "
+                            "FROM users "
+                            "WHERE id = %s;", (self.id,))
+        user = self.cursor.fetchone()
+        if user is None:
+            self.cursor.execute('INSERT INTO users (id, metadata, trello) VALUES (%s,%s,%s)',
+                                (self.id,
+                                 json.dumps({
+                                        'name': self.name,
+                                        'channel_id': self.direct_channel_id,
+                                        'real_name': self.real_name,
+                                        'team_id': self.team_id,
+                                        'tz_offset': self.tz_offset,
+                                        'is_admin': self.is_admin,
+                                        'is_owner': self.is_owner,
+                                        'num_groups': len(self.groups),
+                                        'num_calendar': len(self.calendar),
+                                        'groups': self.groups,
+                                        'calendar': self.calendar}),
+                                 json.dumps(self.member)))
+            self.connection.commit()
         else:
-            with open('./BD/Users/{}.txt'.format(self.real_name), 'w+') as f:
-                f.write(json.dumps({
-                    'name': self.name,
-                    'id': self.id,
-                    'channel_id': self.direct_channel_id,
-                    'real_name': self.real_name,
-                    'team_id': self.team_id,
-                    'tz_offset': self.tz_offset,
-                    'is_admin': self.is_admin,
-                    'is_owner': self.is_owner,
-                    'num_groups': len(self.groups),
-                    'num_calendar': len(self.calendar),
-                    'trello_user': self.member,
-                    'GROUPS': self.groups,
-                    'CALENDAR': self.calendar,
-                }))
+            user = list(user)
+            user[1]['num_groups'] = len(self.groups)
+            user[1]['groups'] = self.groups
+            user[1]['num_calendar'] = len(self.calendar)
+            user[1]['calendar'] = self.calendar
+            user[2] = self.member
+            self.cursor.execute('UPDATE users SET metadata = %s, trello = %s WHERE id = %s;',
+                                (json.dumps(user[1]),
+                                 json.dumps(user[2]),
+                                 self.id))
+            self.connection.commit()
+            self.stop_connection()
 
+    # When a user is deleted, the Bot creates a reading file
     def creating_reading_file(self):
-        with open('./BD/Users/{}_readable.txt'.format(self.real_name), 'w+') as f:
+        with open('{}_readable.txt'.format(self.real_name), 'w+') as f:
             trello_member = {'None'}
             if self.member != {}:
                 trello_member = self.member
@@ -225,33 +305,122 @@ class User:
 
     # Adding a new task to the user
     def add_task(self, board_id, name_list, task):
+        done = False
+        already_exists = False
         for i, board in enumerate(self.member['boards']):
             if board['id'] == board_id:
                 for j, _list in enumerate(board['lists']):
                     if _list['name'].lower().replace(' ', '') == name_list.lower().replace(' ', ''):
-                        self.member['boards'][i]['lists'][j]['tasks'].append(task)
-                        self.member['num_tasks'] += 1
-        with open('./BD/Users/{}.txt'.format(self.real_name), 'r') as f:
-            data = json.loads(f.read())
-        data['trello_user'] = self.member
-        with open('./BD/Users/{}.txt'.format(self.real_name), 'w') as f:
-            f.write(json.dumps(data))
+                        if 'tasks' in _list.keys():
+                            for task_ in _list['tasks']:
+                                if task_['name'].lower().replace(' ', '') == task['name'].lower().replace(' ', ''):
+                                    already_exists = True
+                                    break
+                            if not already_exists:
+                                self.member['boards'][i]['lists'][j]['tasks'].append(task)
+                                self.member['num_tasks'] += 1
+                                done = True
+                                index_list = j
+                                break
+                        else:
+                            self.member['boards'][i]['lists'][j]['tasks'].append(task)
+                            self.member['num_tasks'] += 1
+                            done = True
+                            index_list = j
+                            break
+            if done:
+                index_board = i
+                break
+        if done:
+            self.start_connection()
+            self.cursor.execute("SELECT trello "
+                                "FROM users "
+                                "WHERE id = %s;", (self.id,))
+            boards = list(self.cursor.fetchone())
+            boards[0]['boards'][index_board]['lists'][index_list]['tasks'].append(task)
+            boards = tuple(boards)
+            self.cursor.execute("UPDATE users SET trello = %s WHERE id = %s;",
+                                (json.dumps(boards[0]),
+                                 self.id))
+            self.connection.commit()
+            self.stop_connection()
+        return done, already_exists
 
+    # User added to a task
+    def added_to_task(self, index_board, index_list, task):  # todo test
+        self.start_connection()
+        self.cursor.execute("SELECT trello "
+                            "FROM users "
+                            "WHERE id = %s;", (self.id,))
+        boards = list(self.cursor.fetchone())
+        boards[0]['boards'][index_board]['lists'][index_list]['tasks'].append(task)
+        boards = tuple(boards)
+        self.cursor.execute("UPDATE users SET trello = %s WHERE id = %s;",
+                            (json.dumps(boards[0]),
+                             self.id))
+        self.connection.commit()
+        self.stop_connection()
+
+    # User added to a channel with a board
+    def board_added_to_user(self):
+        self.start_connection()
+        self.cursor.execute("SELECT trello "
+                            "FROM users "
+                            "WHERE id = %s;", (self.id,))
+        boards = list(self.cursor.fetchone())
+        boards[0]['boards'] = self.member['boards']
+        boards = tuple(boards)
+        self.cursor.execute("UPDATE users SET trello = %s WHERE id = %s;",
+                            (json.dumps(boards[0]),
+                             self.id))
+        self.connection.commit()
+        self.stop_connection()
+
+    # A user joined a channel
     def new_group_added(self, channel_id):
-        if channel_id not in self.groups:
+        self.start_connection()
+        self.cursor.execute("SELECT metadata "
+                            "FROM users "
+                            "WHERE id = %s;", (self.id,))
+        user = self.cursor.fetchone()
+        user = list(user)
+        if channel_id not in user[0]['groups']:
             self.groups.append(channel_id)
-            with open('./BD/Users/{}.txt'.format(self.real_name), 'r') as f:
-                data = json.loads(f.read())
-            data['num_groups'] += 1
-            data['GROUPS'].append(channel_id)
-            with open('./BD/Users/{}.txt'.format(self.real_name), 'w+') as f:
-                f.write(json.dumps(data))
+            user[0]['num_groups'] += 1
+            user[0]['groups'].append(channel_id)
+        self.cursor.execute('UPDATE users SET metadata = %s WHERE id = %s;',
+                            (json.dumps(user[0]),
+                             self.id))
+        self.connection.commit()
+        self.stop_connection()
 
+    # A board was deleted
     def board_deleted(self, channel_id):
         self.groups.pop(self.groups.index(channel_id))
-        with open('./BD/Users/{}.txt'.format(self.real_name), 'r') as f:
-            data = json.loads(f.read())
-        data['num_groups'] -= 1
-        data['GROUPS'].pop(data['GROUPS'].index(channel_id))
-        with open('./BD/Users/{}.txt'.format(self.real_name), 'w+') as f:
-            f.write(json.dumps(data))
+        self.start_connection()
+        self.cursor.execute("SELECT metadata "
+                            "FROM users "
+                            "WHERE id = %s;", (self.id,))
+        user = self.cursor.fetchone()
+        user = list(user)
+        user[0]['groups'] = self.groups
+        user[0]['num_groups'] -= 1
+        self.cursor.execute('UPDATE users SET metadata = %s WHERE id = %s;',
+                            (json.dumps(user[0]),
+                             self.id))
+        self.connection.commit()
+        self.stop_connection()
+
+    # Start database connection
+    def start_connection(self):
+        self.connection = psycopg2.connect(user=os.environ.get('SQL_USER'),
+                                           password=os.environ.get('SQL_PASSWORD'),
+                                           host=os.environ.get('SQL_HOST'),
+                                           port=os.environ.get('SQL_PORT'),
+                                           database=os.environ.get('SQL_NAME'))
+        self.cursor = self.connection.cursor()
+
+    # Stop database connection
+    def stop_connection(self):
+        self.cursor.close()
+        self.connection.close()

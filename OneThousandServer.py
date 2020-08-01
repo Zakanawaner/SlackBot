@@ -9,11 +9,10 @@ from slack import WebClient
 from flask import Flask, request, make_response
 from OneThousandBot import Bot
 
-
 # Send it to environmental variables
-TOKEN = os.environ.get('SLACK_BOT_TOKEN')
-SIGNING = os.environ.get('SLACK_SIGNING_SECRET')
-API_KEY_TRELLO = os.environ.get('TRELLO_API_KEY')
+TOKEN = os.environ.get('SLACK_TOKEN')
+SIGNING = os.environ.get('SLACK_SIGNING')
+API_KEY_TRELLO = os.environ.get('TRELLO_KEY')
 TOKEN_TRELLO = os.environ.get('TRELLO_TOKEN')
 
 # Server initialization
@@ -35,15 +34,20 @@ def add():
 
 # Command /addtrello
 @app.route('/trellobot', methods=["GET", "POST"])
-def trello():
+def trellobot():
     return make_response(bot.trello(request), 200)
 
-# Command /deleteboard # No implementada
-@app.route('/deleteboard', methods=["GET", "POST"])
+# Command /deleteboard
+@app.route('/deleteboard', methods=["GET", "POST"])  # todo test all the way and delete it from classes
 def delete_board():
     return make_response(bot.delete_board(request), 200)
 
-# Command /createboard # No implementada
+# Command /updateboard
+@app.route('/updateboard', methods=["GET", "POST"])
+def update_board():
+    return make_response(bot.update_board(request), 200)
+
+# Command /createboard
 @app.route('/createboard', methods=["GET", "POST"])
 def create_board():
     return make_response(bot.create_board(request), 200)
@@ -53,7 +57,7 @@ def create_board():
 def work():
     return make_response(bot.work(request), 200)
 
-# User clicked into your App Home NOK
+# User clicked into your App Home
 @slack_events_adapter.on('app_home_opened')
 def app_home_opened(event_data):
     bot.event_app_home_opened(event_data)
@@ -100,22 +104,22 @@ def group_left(event_data):
 
 # Bot joined a private group
 @slack_events_adapter.on('group_joined')
-def group_left(event_data):
+def group_joined(event_data):
     bot.event_member_joined_channel(event_data)
 
 # A private channel was deleted
 @slack_events_adapter.on('group_deleted')
-def group_joined(event_data):
+def group_deleted(event_data):
     bot.event_channel_deleted(event_data)
 
 # A member joined a channel
 @slack_events_adapter.on('member_joined_channel')
-def handle_message(event_data):
+def member_joined_channel(event_data):
     bot.event_member_joined_channel(event_data)
 
 # A member left a channel
 @slack_events_adapter.on('member_left_channel')
-def handle_message(event_data):
+def member_left_channel(event_data):
     bot.event_member_left_channel(event_data)
 
 # A message was posted on a channel
@@ -134,5 +138,3 @@ if __name__ == "__main__":
     bot = Bot(TOKEN, TOKEN_TRELLO, API_KEY_TRELLO)
     # Calling the server
     app.run(port=5000)
-    # bot.model.interact(personality=["i am a troll .", "i love making fun of people .", "i am not correct .", "i am not polite ."])
-    # bot.model.interact_single('Hello! What is yur name?', '', personality=None, encode_history=True)

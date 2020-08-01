@@ -65,7 +65,12 @@ class Gateway:
             'users': user_id,
         }).json()
 
-    def method_send_file(self, channel_id, file):
+    def method_share_file(self, channel_id, file):
+        file = requests.get('https://slack.com/api/files.remote.add', {
+            'token': self.token,
+            'users': channel_id,
+
+        }).json()
         return requests.post('https://slack.com/api/files.upload', {
             'token': self.token,
             'users': channel_id,
