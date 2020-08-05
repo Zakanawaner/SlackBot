@@ -10,10 +10,10 @@ from flask import Flask, request, make_response
 from OneThousandBot import Bot
 
 # Send it to environmental variables
-TOKEN = os.environ.get('SLACK_TOKEN')
-SIGNING = os.environ.get('SLACK_SIGNING')
-API_KEY_TRELLO = os.environ.get('TRELLO_KEY')
-TOKEN_TRELLO = os.environ.get('TRELLO_TOKEN')
+TOKEN = os.environ.get('TOKEN')
+SIGNING = os.environ.get('SIGNING')
+API_KEY_TRELLO = os.environ.get('API_KEY_TRELLO')
+TOKEN_TRELLO = os.environ.get('TOKEN_TRELLO')
 
 # Server initialization
 app = Flask(__name__)

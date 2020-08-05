@@ -81,16 +81,10 @@ class Project:
                                  json.dumps(channel[3]),
                                  self.id))
             self.connection.commit()
-            self.stop_connection()
+        self.stop_connection()
 
     # When a channel is deleted, the Bot creates a reading file
     def create_reading_file(self):
-        self.start_connection()
-        self.cursor.execute("SELECT * "
-                            "FROM channels "
-                            "WHERE id = %s;", (self.id,))
-        channel = self.cursor.fetchone()
-        channel = list(channel)
         with open('{}_readable.txt'.format(self.name), 'w+') as f:
             trello_board = ''
             if self.board != {}:
@@ -278,7 +272,7 @@ class User:
                                  json.dumps(user[2]),
                                  self.id))
             self.connection.commit()
-            self.stop_connection()
+        self.stop_connection()
 
     # When a user is deleted, the Bot creates a reading file
     def creating_reading_file(self):
